@@ -23,7 +23,7 @@
 
 #ifdef OBSERVER
 
-extern cvar_t *observer;
+extern cvar_t *ra;	/* rocketarena cvar; gates leaving observer mode */
 extern void SelectSpawnPoint(edict_t *ent, vec3_t origin, vec3_t angles);
 
 //===========================================================================
@@ -87,7 +87,7 @@ static void ClientPlaceCamera(edict_t *ent)
 		cam->clientorigin[1] = ent->s.origin[1];
 		cam->clientorigin[2] = ent->s.origin[2];
 	} //end if
-	else if (!cam->ent || !cam->ent->inuse || !(cam->ent->flags & FL_OBSERVER))
+	else if (!cam->ent || !cam->ent->inuse || (cam->ent->flags & FL_OBSERVER))
 	{
 		cam->ent = ent;
 		CameraPlaceAtTarget(ent,
@@ -97,7 +97,7 @@ static void ClientPlaceCamera(edict_t *ent)
 			   the most-recent received cmd-angles vector. */
 			ent->client->resp.cmd_angles);
 	} //end else if
-	/* else: current target is a valid observer client; leave camera alone */
+	/* else: current target is a live non-observer player; keep tracking it */
 } //end of the function ClientPlaceCamera
 
 //===========================================================================
@@ -187,7 +187,7 @@ void ClientSetCamera(edict_t *ent)
 	{
 		cand = g_edicts + 1 + i;
 		if (!cand->inuse) continue;
-		if (!strcmp(name, cand->client->pers.netname))
+		if (!Q_stricmp(name, cand->client->pers.netname))
 		{
 			cam->ent = cand;
 			break;
@@ -218,12 +218,12 @@ void ClientToggleObserver(edict_t *ent)
 	if (ent->flags & FL_OBSERVER)
 	{
 		// ---- leaving observer mode ----
-		if (deathmatch->value == 0)
+		if (deathmatch->value)
 		{
 			respawn(ent);
 			return;
 		} //end if
-		if (observer->value == 0)
+		if (ra->value)
 		{
 			gi.cprintf(ent, PRINT_HIGH, "can't leave observer mode\n");
 			return;
@@ -469,15 +469,12 @@ static void CameraChaseCamThink(edict_t *ent, usercmd_t *ucmd)
 	} //end if
 	else
 	{
-		// Lerp ent_angles toward target's v_angle by (level.time - lasttime),
-		// clamped by max-step 1.0.  Inlined to avoid depending on an
-		// engine helper that isn't in q_shared.
-		float frac = level.time - cam->lasttime;
-		if (frac < 0) frac = 0;
-		if (frac > 1.0) frac = 1.0;
-		cam->ent_angles[0] += frac * AngleDifference(cam->ent->client->v_angle[0], cam->ent_angles[0]);
-		cam->ent_angles[1] += frac * AngleDifference(cam->ent->client->v_angle[1], cam->ent_angles[1]);
-		cam->ent_angles[2] += frac * AngleDifference(cam->ent->client->v_angle[2], cam->ent_angles[2]);
+		/* disasm @ 0x1007b0e4: call SubLerpAngle (sub_10077e29) with
+		   args (cam->ent_angles, target->v_angle, level.time-lasttime, 1.0). */
+		SubLerpAngle(cam->ent_angles,
+		             cam->ent->client->v_angle,
+		             level.time - cam->lasttime,
+		             1.0f);
 	} //end else
 	cam->lasttime = level.time;
 
@@ -722,16 +719,18 @@ static void CameraInputThink(edict_t *ent, usercmd_t *ucmd)
 			cam->chaseoffset[YAW] -= inv_m_pitch * pitch_diff * 0.5f;
 	}
 
-	// chaseoffset[PITCH] += yaw_diff * 0.2 ; wrap.
+	// chaseoffset[YAW] += yaw_diff * 0.2 ; wrap.  (disasm writes cam+0x2c
+	// which is chaseoffset[1]=[YAW]; only triggered if |yaw_diff|>10)
 	if (yaw_diff >  10.0f || yaw_diff < -10.0f)
 	{
-		cam->chaseoffset[PITCH] += yaw_diff * 0.2f;
-		cam->chaseoffset[PITCH]  = anglemod(cam->chaseoffset[PITCH]);
+		cam->chaseoffset[YAW] += yaw_diff * 0.2f;
+		cam->chaseoffset[YAW]  = anglemod(cam->chaseoffset[YAW]);
 	}
 
-	// chaseoffset[YAW] clamp into [32, 100].
-	if (cam->chaseoffset[YAW] >  100.0f) cam->chaseoffset[YAW] = 100.0f;
-	else if (cam->chaseoffset[YAW] < 32.0f) cam->chaseoffset[YAW] = 32.0f;
+	// chaseoffset[PITCH] clamp into [32, 100].  (disasm writes cam+0x28
+	// which is chaseoffset[0]=[PITCH])
+	if (cam->chaseoffset[PITCH] >  100.0f) cam->chaseoffset[PITCH] = 100.0f;
+	else if (cam->chaseoffset[PITCH] < 32.0f) cam->chaseoffset[PITCH] = 32.0f;
 
 	// chaseoffset[ROLL] clamp into [-48, 48].
 	if (cam->chaseoffset[ROLL] >  48.0f) cam->chaseoffset[ROLL] =  48.0f;
@@ -931,9 +930,10 @@ static void CameraAutoCamState2(edict_t *ent, usercmd_t *ucmd)
 		return;
 	}
 
-	// If target is on ground (not == 'special-ignore-ent' global at 0x100cfd14),
-	// fetch its aim point and decide whether to upgrade to tracking state 3.
-	if (cam->ent->groundentity != NULL && cam->ent->groundentity != (edict_t *)NULL /* 0x100cfd14 */)
+	/* disasm @ 0x10079fc5: cmp [cam->ent + 0x228 (groundentity)], 0; je skip.
+	   @ 0x10079fd9: cmp groundentity, [0x100cfd14] (g_edicts = worldspawn);
+	   je skip.  Upgrade to state 3 only if standing on a non-world entity. */
+	if (cam->ent->groundentity != NULL && cam->ent->groundentity != g_edicts)
 	{
 		SubGetTargetMuzzle(ent, aimend);
 		if (SubCanSeePoint(ent, aimend))
@@ -949,17 +949,16 @@ static void CameraAutoCamState2(edict_t *ent, usercmd_t *ucmd)
 	dir[2] = cam->dest[2] - cam->ent->s.origin[2];
 	dist = VectorLength(dir);
 
-	if (!SubTargetVisible(ent, cam->ent) || cam->maxflybydist > dist)
+	/* disasm @ 0x1007a07a..0x1007a0a1: SetSpot if (visible && maxflybydist >
+	   dist) OR (pause_time > level.time); SetAutocamTarget otherwise. */
+	if ((SubTargetVisible(ent, cam->ent) && cam->maxflybydist > dist)
+	    || cam->pause_time > level.time)
 	{
-		// Stale dest -- pick a fresh spot or new target.
-		if (cam->pause_time < level.time)
-		{
-			SubAutocamSetSpot(cam->ent, cam->viewtarget);
-		}
-		else
-		{
-			SubSetAutocamTarget(ent, cam->ent, ucmd);
-		}
+		SubAutocamSetSpot(cam->ent, cam->viewtarget);
+	}
+	else
+	{
+		SubSetAutocamTarget(ent, cam->ent, ucmd);
 	}
 
 	dir[0] = cam->ent->s.origin[0] - ent->s.origin[0];
@@ -1010,15 +1009,16 @@ static void CameraAutoCamState7(edict_t *ent, usercmd_t *ucmd)
 		return;
 	}
 
-	// If we've latched onto a 'bodyque' classname entity that has been
-	// re-linked to a new corpse, follow the chain pointer.
-	if (strcmp(cam->ent->classname, "bodyque") == 0
+	/* disasm @ 0x10079c63: strcmp(classname, "bodyque"); je skip-block
+	   (jumps when strings EQUAL).  The chain-follow block runs only when
+	   cam->ent is NOT a "bodyque" entity but is alive; the indirection
+	   it walks is edict_t.goalentity (offset 0x19c), not chain (0x218). */
+	if (strcmp(cam->ent->classname, "bodyque") != 0
 	    && cam->ent->deadflag == 0)
 	{
-		// edict_t.chain at +0x19c -- next corpse in the queue
-		void *chain = cam->ent->chain;
-		if (chain != NULL)
-			cam->ent = chain;
+		edict_t *next = cam->ent->goalentity;
+		if (next != NULL)
+			cam->ent = next;
 		else
 			{ SubAbortAutocam(ent, ucmd); return; }
 	}
@@ -1051,14 +1051,16 @@ static void CameraAutoCamState7(edict_t *ent, usercmd_t *ucmd)
 		cam->viewtarget[1] = cam->ent->s.origin[1];
 		cam->viewtarget[2] = cam->ent->s.origin[2] + 8.0f;   // 0x1009215c
 
-		// If we can see straight to that point, no further work.
+		/* If we can't see the target point, decide whether to retry-target
+		   or abort.  disasm @ 0x10079de1..0x10079e21 checks horizontal
+		   velocity (cam->ent->velocity[0] at +0x178 and velocity[1] at
+		   +0x17c) -- NOT [1] and [2] -- with fcomp 0.0 ; test ah,0x40 (C3
+		   only), so the predicate is EQUAL to 0, not <= 0. */
 		if (!SubCanSeePoint(ent, cam->viewtarget))
 		{
-			// Else: if the corpse's velocity Y/Z are both <= 0,
-			// abort -- it's stopped tumbling and we can't reach.
+			float vx = cam->ent->velocity[0];
 			float vy = cam->ent->velocity[1];
-			float vz = cam->ent->velocity[2];
-			if (vy <= 0.0f && vz <= 0.0f)
+			if (vx == 0.0f && vy == 0.0f)
 			{
 				SubAbortAutocam(ent, ucmd);
 				return;
@@ -1068,11 +1070,13 @@ static void CameraAutoCamState7(edict_t *ent, usercmd_t *ucmd)
 			cam->pause_time = level.time + 2.0f;          // 0x1009216c LSB = 2.0
 		}
 
-		// Refresh pause_time if velocity is non-zero (corpse still moving).
+		/* Refresh pause_time when EITHER horizontal velocity component is
+		   non-zero.  disasm @ 0x10079e58..0x10079e97 same fcomp 0.0 ; test
+		   ah,0x40 pattern on velocity[0] and velocity[1]. */
 		{
+			float vx = cam->ent->velocity[0];
 			float vy = cam->ent->velocity[1];
-			float vz = cam->ent->velocity[2];
-			if (vy > 0.0f || vz > 0.0f)
+			if (vx != 0.0f || vy != 0.0f)
 				cam->pause_time = level.time + 2.0f;
 		}
 	}
@@ -1270,11 +1274,15 @@ install_target:
 	diff[2] = cam->dest2[2] - cam->dest[2];
 	best = VectorLength(diff);
 
-	// --- First trace candidate (dead code in the original) -----------------
-	// Guard: sqrt(anglemod(yaw_anglemod - yaw_to_target)) > 60.0?  The
-	// operand is in [0,360) so its sqrt is in [0,~19) and the comparison
-	// always fails -- the block below never executes.  Kept for parity.
-	if ((float)sqrt(anglemod(yaw_anglemod - yaw_to_target)) > 60.0)
+	/* --- First trace candidate -------------------------------------------
+	   disasm @ 0x1007a771..0x1007a78f computes
+	     fabs(anglemod(yaw_anglemod - yaw_to_target)) > 60.0
+	   (call 0x10087ba7 is _CIfabs -- the function clears the sign bit at
+	   0x10087c3f -- *not* sqrt as earlier drafts assumed; the block is
+	   therefore LIVE for most yaw deltas, not dead.  Constant at
+	   0x100925e8 is 60.0 (double).  Since anglemod's output is already
+	   non-negative the fabs() is identity here, but kept verbatim. */
+	if (fabs((double)anglemod(yaw_anglemod - yaw_to_target)) > 60.0)
 	{
 		new_dest[0] = delta[0] + cam->dest[0];
 		new_dest[1] = delta[1] + cam->dest[1];
@@ -1301,7 +1309,8 @@ install_target:
 
 	// --- Second trace candidate (yaw + 180) --------------------------------
 	yaw_anglemod = anglemod(yaw_anglemod + 180.0f);       // 0x100922f0 = 180
-	if ((float)sqrt(anglemod(yaw_anglemod - yaw_to_target)) > 60.0)
+	/* Same fabs(anglemod(...)) > 60.0 guard at 0x1007a879..0x1007a8a9. */
+	if (fabs((double)anglemod(yaw_anglemod - yaw_to_target)) > 60.0)
 	{
 		new_dest[0] = cam->dest[0] - angles[0];           // -fwd*2000
 		new_dest[1] = cam->dest[1] - angles[1];
@@ -1347,7 +1356,9 @@ install_target:
 		diff[2] = cam->dest[2] - cam->viewtarget[2];
 		VectorNormalize(diff);
 
-		scale = (float)(rand() & 0x7FFF) / 32767.0f * 50.0f + 10.0f;   // [10,60]
+		/* disasm @ 0x1007aa68 fmul [0x100923a4]=50.0; @ 0x1007aa6e fadd
+		   [0x10092164]=5.0 (NOT 10.0) -- scale range is [5, 55]. */
+		scale = (float)(rand() & 0x7FFF) / 32767.0f * 50.0f + 5.0f;
 		VectorScale(diff, scale, diff);
 
 		diff[0] += cam->viewtarget[0];
@@ -1598,14 +1609,16 @@ static qboolean SubTargetVisible(edict_t *ent, edict_t *target)
 static edict_t *SubNextClient(edict_t *prev)
 {
 	int i;
-	int num_edicts = globals.num_edicts;
+	/* disasm reads game.maxclients at [0x100d04c8] (same address used by
+	   ClientCycleCamera/ClientSetCamera); iterate only over client slots. */
+	int n = game.maxclients;
 
 	if (prev == NULL)
 		i = 0;
 	else
 		i = (int)(prev - g_edicts);
 
-	for (; i < num_edicts; i++)
+	for (; i < n; i++)
 	{
 		edict_t *e = &g_edicts[i + 1];
 		if (!e->inuse)
@@ -1856,7 +1869,9 @@ static void SubSetAutocamTarget(edict_t *ent, edict_t *target, usercmd_t *ucmd)
 	diff[2] = cam->dest[2] - cam->viewtarget[2];
 
 	len = VectorLength(diff) * 1.5f;
-	if (len > 500.0f) len = 500.0f;
+	/* disasm @ 0x10079bff: fcomp 500.0; je-on-C0=0 skips clamp -> the clamp
+	   fires when len < 500, enforcing a FLOOR of 500 (not a ceiling). */
+	if (len < 500.0f) len = 500.0f;
 	cam->maxflybydist = len;
 
 	CameraMove(ent, 0, ucmd);
@@ -1964,7 +1979,11 @@ static float SubScoreCameraPos(edict_t *ent, vec3_t ofs, vec3_t out_endpos)
 	if (dist > 50.0f)
 		return 1111.0f;
 
-	return (float)sqrt(333.0 - (double)dist);
+	/* disasm @ 0x10078f27..0x10078f36: fld [0x100925d8]=333.0; fsub dist;
+	   call 0x10087ba7 -- this is _CIfabs (clears the sign bit at
+	   0x10087c3f), NOT sqrt.  Since dist<=50 here, 333-dist>=283 is
+	   always non-negative and the fabs() is identity. */
+	return (float)fabs(333.0 - (double)dist);
 }
 
 // --- sub_10078f4a -----------------------------------------------------------
@@ -2002,16 +2021,27 @@ static qboolean SubCameraFindFlybyPos(edict_t *ent, edict_t *target, vec3_t out)
 	vec3_t    cand_ofs;
 	vec3_t    cand_endpos;
 	vec3_t    best_endpos;
+	vec3_t    input_angles;
 	float     best_score;
 	float     score;
 
 	(void)target;   /* unused in the original */
 
+	/* disasm @ 0x10078f5f..0x10078f8d: stack slots [ebp-0x30..-0x28]
+	   (later reused as best_endpos) are zeroed then [ebp-0x28] is set to
+	   cam->ent->s.angles[2] (= s.angles[ROLL] at edict offset 0x18); the
+	   resulting vec3 {0, 0, ent.angles[ROLL]} is passed to AngleVectors as
+	   the seed for the search basis -- NOT cam->angles.  best_endpos
+	   reuses the same slots but is only ever read after a successful
+	   candidate has overwritten it, so its initial value is irrelevant. */
+	input_angles[0] = 0;
+	input_angles[1] = 0;
+	input_angles[2] = cam->ent->s.angles[2];
 	best_endpos[0] = 0;
 	best_endpos[1] = 0;
-	best_endpos[2] = cam->ent->s.angles[2]; /* raw seed from [ent+0x18] */
+	best_endpos[2] = input_angles[2];
 
-	AngleVectors(cam->angles, fwd, right, up);
+	AngleVectors(input_angles, fwd, right, up);
 	VectorScale(fwd, 3.0f, fwd);
 	best_score = 1000.0f;
 
@@ -2125,9 +2155,10 @@ int DoObserver(edict_t *ent, usercmd_t *ucmd)
 		ClientPlaceCamera(ent);
 
 	// jump button (upmove > 100) cycles the target / chase camera, with a
-	// 0.7s debounce held in cam->lastcycle so a held key doesn't tear
-	// through the client list in one frame
-	if (ucmd->upmove > 100 && level.time - 0.7 > cam->lastcycle)
+	// 0.5s debounce held in cam->lastcycle so a held key doesn't tear
+	// through the client list in one frame (qword 0.5 at gamex86.dll
+	// 0x10092138, fsub'd from level.time at sub_1007b926+0x6f)
+	if (ucmd->upmove > 100 && level.time - 0.5 > cam->lastcycle)
 	{
 		cam->lastcycle = level.time;
 		if (cam->flags & CAMFL_AUTOCAM)
