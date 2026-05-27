@@ -751,9 +751,6 @@ extern	cvar_t	*timelimit;
 #ifdef ZOID
 extern	cvar_t	*capturelimit;
 #endif //ZOID
-#ifdef OBSERVER
-extern	cvar_t	*observer;
-#endif //OBSERVER
 #ifdef CTF_HOOK
 extern  cvar_t  *ctf_hook;
 #endif //CTF_HOOK
