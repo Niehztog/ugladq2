@@ -43,6 +43,9 @@ cvar_t	*timelimit;
 cvar_t	*capturelimit;
 cvar_t	*botctfteam;
 #endif //ZOID
+#ifdef OBSERVER
+cvar_t	*observer;
+#endif //OBSERVER
 cvar_t	*password;
 cvar_t	*spectator_password;
 cvar_t	*needpass;

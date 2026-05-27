@@ -65,7 +65,7 @@ GAME_OBJS = \
 	src/m_infantry.o src/m_insane.o src/m_medic.o src/m_move.o src/m_move2_rogue.o src/m_mutant.o\
 	src/m_parasite.o src/m_soldier.o src/m_stalker_rogue.o src/m_supertank.o src/m_tank.o\
 	src/m_turret_rogue.o src/m_widow2_rogue.o src/m_widow_rogue.o src/p_botmenu.o\
-	src/p_client.o src/p_hud.o src/p_lag.o src/p_menu.o src/p_menulib.o src/p_trail.o\
+	src/p_client.o src/p_hud.o src/p_lag.o src/p_menu.o src/p_menulib.o src/p_observer.o src/p_trail.o\
 	src/p_view.o src/p_weapon.o src/q_shared.o
 
 game$(SHLIBEXT) : $(GAME_OBJS)

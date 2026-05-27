@@ -240,6 +240,9 @@ void InitGame (void)
 	capturelimit = gi.cvar("capturelimit", "0", CVAR_SERVERINFO);
 	botctfteam = gi.cvar("botctfteam", "0", 0);
 #endif //ZOID
+#ifdef OBSERVER
+	observer = gi.cvar("observer", "1", CVAR_LATCH);
+#endif //OBSERVER
 	password = gi.cvar ("password", "", CVAR_USERINFO);
 	spectator_password = gi.cvar ("spectator_password", "", CVAR_USERINFO);
 	needpass = gi.cvar ("needpass", "0", CVAR_SERVERINFO);

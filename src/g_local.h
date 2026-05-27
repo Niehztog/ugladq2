@@ -61,6 +61,10 @@
 #include "bl_debug.h"
 #endif //BOT
 
+#ifdef OBSERVER
+#include "p_observer.h"
+#endif //OBSERVER
+
 #ifdef LOGFILE
 #include "g_log.h"
 #endif //LOGFILE
@@ -747,6 +751,9 @@ extern	cvar_t	*timelimit;
 #ifdef ZOID
 extern	cvar_t	*capturelimit;
 #endif //ZOID
+#ifdef OBSERVER
+extern	cvar_t	*observer;
+#endif //OBSERVER
 #ifdef CTF_HOOK
 extern  cvar_t  *ctf_hook;
 #endif //CTF_HOOK
