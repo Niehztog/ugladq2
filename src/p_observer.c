@@ -1126,11 +1126,13 @@ static void CameraAutoCamState0(edict_t *ent, usercmd_t *ucmd)
 	float     yaw_random;
 	float     yaw_anglemod;
 	float     yaw_to_target;
-	vec3_t    angles;       // [-0x70..-0x68]: angles, later overwritten with fwd*2000
-	vec3_t    delta;        // [-0x64..-0x5c]: target.origin - cam->dest, later angles via vectoangles
+	vec3_t    angles;       // [-0x70..-0x68]: random angles → fwd*2000 → block-1 scratch
+	                        // (overwritten in block 1 with delta+cam->dest; block 2 reads
+	                        // whichever value it currently holds)
+	vec3_t    delta;        // [-0x64..-0x5c]: pos diff → vectoangles result → trace target
+	                        // → trace endpoint.  Both blocks pass &delta to gi.trace.
 	vec3_t    fwd;          // [-0xc..0x0]: AngleVectors output
 	vec3_t    diff;         // [-0x90..-0x88]: scratch for VectorLength
-	vec3_t    new_dest;
 	trace_t   tr;
 
 	// ent->client->camera
@@ -1281,14 +1283,21 @@ install_target:
 	   0x10087c3f -- *not* sqrt as earlier drafts assumed; the block is
 	   therefore LIVE for most yaw deltas, not dead.  Constant at
 	   0x100925e8 is 60.0 (double).  Since anglemod's output is already
-	   non-negative the fabs() is identity here, but kept verbatim. */
+	   non-negative the fabs() is identity here, but kept verbatim.
+
+	   The store to `angles` (= [-0x70..-0x68]) is intentional: this slot
+	   was fwd*2000 going in but is reused as a *cross-block scratch*
+	   read by the second trace candidate as the subtraction operand.
+	   The first trace itself targets &delta (still the vectoangles
+	   output at this point, treated as raw coordinates) -- this matches
+	   disasm @ 0x1007a7c2 (lea eax,[ebp-0x64]; push eax) exactly. */
 	if (fabs((double)anglemod(yaw_anglemod - yaw_to_target)) > 60.0)
 	{
-		new_dest[0] = delta[0] + cam->dest[0];
-		new_dest[1] = delta[1] + cam->dest[1];
-		new_dest[2] = delta[2] + cam->dest[2];
+		angles[0] = delta[0] + cam->dest[0];
+		angles[1] = delta[1] + cam->dest[1];
+		angles[2] = delta[2] + cam->dest[2];
 		tr = gi.trace(cam->dest, vec3_origin, vec3_origin,
-		              new_dest, ent, OBSERVER_TRACE_MASK);
+		              delta, ent, OBSERVER_TRACE_MASK);
 		delta[0] = tr.endpos[0];
 		delta[1] = tr.endpos[1];
 		delta[2] = tr.endpos[2];
@@ -1307,16 +1316,19 @@ install_target:
 		}
 	}
 
-	// --- Second trace candidate (yaw + 180) --------------------------------
+	/* --- Second trace candidate (yaw + 180) -------------------------------
+	   disasm @ 0x1007a8af..0x1007a8d0 stores delta = cam->dest - angles.
+	   `angles` here holds either fwd*2000 (if block 1's guard failed) or
+	   delta_old + cam->dest (if block 1 ran) -- block 1's side-effect is
+	   load-bearing for this trace target. */
 	yaw_anglemod = anglemod(yaw_anglemod + 180.0f);       // 0x100922f0 = 180
-	/* Same fabs(anglemod(...)) > 60.0 guard at 0x1007a879..0x1007a8a9. */
 	if (fabs((double)anglemod(yaw_anglemod - yaw_to_target)) > 60.0)
 	{
-		new_dest[0] = cam->dest[0] - angles[0];           // -fwd*2000
-		new_dest[1] = cam->dest[1] - angles[1];
-		new_dest[2] = cam->dest[2] - angles[2];
+		delta[0] = cam->dest[0] - angles[0];
+		delta[1] = cam->dest[1] - angles[1];
+		delta[2] = cam->dest[2] - angles[2];
 		tr = gi.trace(cam->dest, vec3_origin, vec3_origin,
-		              new_dest, ent, OBSERVER_TRACE_MASK);
+		              delta, ent, OBSERVER_TRACE_MASK);
 		delta[0] = tr.endpos[0];
 		delta[1] = tr.endpos[1];
 		delta[2] = tr.endpos[2];
@@ -1836,9 +1848,10 @@ static void SubSetAutocamTarget(edict_t *ent, edict_t *target, usercmd_t *ucmd)
 {
 	camera_t *cam = &ent->client->camera;
 	vec3_t   pos, diff;
-	float    len;
 
-	cam->pause_time = level.time + 0.4f;
+	/* disasm @ 0x10079aea: fadd qword [0x100921a8]=0.4 -- double-precision
+	   add, so the literal must be a double (no `f` suffix) to match. */
+	cam->pause_time = level.time + 0.4;
 
 	if (cam->ent != target)
 	{
@@ -1868,11 +1881,14 @@ static void SubSetAutocamTarget(edict_t *ent, edict_t *target, usercmd_t *ucmd)
 	diff[1] = cam->dest[1] - cam->viewtarget[1];
 	diff[2] = cam->dest[2] - cam->viewtarget[2];
 
-	len = VectorLength(diff) * 1.5f;
-	/* disasm @ 0x10079bff: fcomp 500.0; je-on-C0=0 skips clamp -> the clamp
-	   fires when len < 500, enforcing a FLOOR of 500 (not a ceiling). */
-	if (len < 500.0f) len = 500.0f;
-	cam->maxflybydist = len;
+	/* disasm @ 0x10079be7: fmul qword [0x100922b0]=1.5 -- double-precision
+	   multiply, so the literal must be a double (no `f` suffix).
+	   Also: the value is written to cam->maxflybydist BEFORE the 500.0
+	   floor check (disasm @ 0x10079bed stores, then reloads at 0x10079bf6
+	   and compares against [0x10092184]=500.0f).  The clamp fires when
+	   the stored value is < 500, enforcing a FLOOR (not a ceiling). */
+	cam->maxflybydist = VectorLength(diff) * 1.5;
+	if (cam->maxflybydist < 500.0f) cam->maxflybydist = 500.0f;
 
 	CameraMove(ent, 0, ucmd);
 }
@@ -1930,7 +1946,10 @@ static float SubScoreCameraPos(edict_t *ent, vec3_t ofs, vec3_t out_endpos)
 	end[1] = viewfrom[1] + ofs[1];
 	end[2] = viewfrom[2] + ofs[2];
 
-	tr = gi.trace(viewfrom, mins, maxs, end, cam->ent, MASK_SHOT|MASK_OPAQUE);
+	/* disasm @ 0x10078d27: push 0x2010003 (= CONTENTS_SOLID|CONTENTS_WINDOW
+	   |CONTENTS_PLAYERCLIP|CONTENTS_MONSTER = MASK_PLAYERSOLID).  Earlier
+	   "MASK_SHOT|MASK_OPAQUE" was 0x600001B, off by ~3M bits. */
+	tr = gi.trace(viewfrom, mins, maxs, end, cam->ent, MASK_PLAYERSOLID);
 
 	if (tr.ent != g_edicts)
 		return 1111.0f;
@@ -1951,8 +1970,10 @@ static float SubScoreCameraPos(edict_t *ent, vec3_t ofs, vec3_t out_endpos)
 		start2[0] = tr.endpos[0];
 		start2[1] = tr.endpos[1];
 		start2[2] = tr.endpos[2];
+		/* disasm @ 0x10078e09 / 0x10078e62: push 0x201003b
+		   = MASK_PLAYERSOLID | MASK_WATER. */
 		tr = gi.trace(start2, NULL, NULL, viewfrom, cam->ent,
-		              MASK_SHOT|MASK_OPAQUE|MASK_WATER);
+		              MASK_PLAYERSOLID|MASK_WATER);
 	}
 	else if (!cv_view && cv_end)
 	{
@@ -1961,7 +1982,7 @@ static float SubScoreCameraPos(edict_t *ent, vec3_t ofs, vec3_t out_endpos)
 		start2[1] = tr.endpos[1];
 		start2[2] = tr.endpos[2];
 		tr = gi.trace(viewfrom, NULL, NULL, start2, cam->ent,
-		              MASK_SHOT|MASK_OPAQUE|MASK_WATER);
+		              MASK_PLAYERSOLID|MASK_WATER);
 	}
 
 	if (tr.contents & MASK_WATER)
