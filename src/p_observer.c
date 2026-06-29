@@ -89,7 +89,7 @@ static void ClientPlaceCamera(edict_t *ent)
 	} //end if
 	else if (!cam->ent || !cam->ent->inuse || (cam->ent->flags & FL_OBSERVER))
 	{
-		cam->ent = ent;
+		ent->client->camera.ent = ent;
 		CameraPlaceAtTarget(ent,
 			cam->clientorigin,
 			cam->clientangles,
@@ -110,7 +110,6 @@ static void ClientPlaceCamera(edict_t *ent)
 //===========================================================================
 void ClientCycleCamera(edict_t *ent)
 {
-	camera_t *cam;
 	edict_t *cand;
 	int i;
 	int idx;
@@ -118,8 +117,7 @@ void ClientCycleCamera(edict_t *ent)
 	if (!(ent->flags & FL_OBSERVER))
 		ClientToggleObserver(ent);
 
-	cam = &ent->client->camera;
-	if (cam->flags & CAMFL_AUTOCAM)
+	if (ent->client->camera.flags & CAMFL_AUTOCAM)
 	{
 		gi.cprintf(ent, PRINT_HIGH, "cyclecam not available in autocam mode\n");
 		return;
@@ -127,25 +125,29 @@ void ClientCycleCamera(edict_t *ent)
 
 	ClientPlaceCamera(ent);
 
-	idx = (cam->ent - g_edicts) - 1;
+	idx = (ent->client->camera.ent - g_edicts) - 1;
 	for (i = 0; i < game.maxclients; i++)
 	{
 		idx++;
 		if (idx >= game.maxclients) idx = 0;
 		cand = g_edicts + 1 + idx;
-		if (!cand->inuse) continue;
-		if ((cand->flags & FL_OBSERVER) && cand != ent) continue;
-		cam->ent = cand;
-		break;
+		if (cand->inuse)
+		{
+			if (!(cand->flags & FL_OBSERVER) || cand == ent)
+			{
+				ent->client->camera.ent = cand;
+				break;
+			}
+		}
 	} //end for
 
 	if (i == game.maxclients)
 		gi.cprintf(ent, PRINT_HIGH, "no valid client found to observe\n");
 
-	if (cam->ent == ent)
+	if (ent->client->camera.ent == ent)
 		CameraPlaceAtTarget(ent,
-			cam->clientorigin,
-			cam->clientangles,
+			ent->client->camera.clientorigin,
+			ent->client->camera.clientangles,
 			ent->client->resp.cmd_angles);
 } //end of the function ClientCycleCamera
 
@@ -159,16 +161,14 @@ void ClientCycleCamera(edict_t *ent)
 //===========================================================================
 void ClientSetCamera(edict_t *ent)
 {
-	camera_t *cam;
-	edict_t *cand;
-	int i;
 	char *name;
+	int i;
+	edict_t *cand;
 
 	if (!(ent->flags & FL_OBSERVER))
 		ClientToggleObserver(ent);
 
-	cam = &ent->client->camera;
-	if (cam->flags & CAMFL_AUTOCAM)
+	if (ent->client->camera.flags & CAMFL_AUTOCAM)
 	{
 		gi.cprintf(ent, PRINT_HIGH, "setcam not available in autocam mode\n");
 		return;
@@ -187,9 +187,9 @@ void ClientSetCamera(edict_t *ent)
 	{
 		cand = g_edicts + 1 + i;
 		if (!cand->inuse) continue;
-		if (!Q_stricmp(name, cand->client->pers.netname))
+		if (!Q_stricmp(cand->client->pers.netname, name))
 		{
-			cam->ent = cand;
+			ent->client->camera.ent = cand;
 			break;
 		} //end if
 	} //end for
@@ -197,30 +197,30 @@ void ClientSetCamera(edict_t *ent)
 	if (i == game.maxclients)
 		gi.cprintf(ent, PRINT_HIGH, "no valid client found with the name %s\n", name);
 
-	if (cam->ent == ent)
+	if (ent->client->camera.ent == ent)
 		CameraPlaceAtTarget(ent,
-			cam->clientorigin,
-			cam->clientangles,
+			ent->client->camera.clientorigin,
+			ent->client->camera.clientangles,
 			ent->client->resp.cmd_angles);
 } //end of the function ClientSetCamera
 
 //===========================================================================
 // ClientToggleObserver                                       sub_1007bb4c
 //
-// "observer" command toggle.  Note the original tests "deathmatch ==
-// 0" first (in which case respawn() is called -- single-player drops
-// back into normal play immediately), and only then "observer == 0"
-// (which forbids leaving observer mode in a deathmatch where the cvar
-// was disabled).
+// "observer" command toggle.  When leaving observer mode the original
+// first checks the CTF cvar and, if enabled, opens the team/join menu
+// (sub_10018fee = CTFOpenJoinMenu).  Otherwise it checks the Rocket
+// Arena cvar and refuses to leave when RA is active; only the plain
+// non-CTF, non-RA path directly restores the player entity.
 //===========================================================================
 void ClientToggleObserver(edict_t *ent)
 {
 	if (ent->flags & FL_OBSERVER)
 	{
 		// ---- leaving observer mode ----
-		if (deathmatch->value)
+		if (ctf->value)
 		{
-			respawn(ent);
+			CTFOpenJoinMenu(ent);
 			return;
 		} //end if
 		if (ra->value)
@@ -258,8 +258,8 @@ void ClientToggleObserver(edict_t *ent)
 		ent->svflags |= SVF_NOCLIENT;
 		ent->client->camera.ent = ent;
 		ClientPlaceCamera(ent);
-		if (deathmatch->value)
-			ent->client->resp.score = 0;
+		if (ctf->value)
+			ent->client->resp.ctf_team = 0;
 		gi.bprintf(PRINT_HIGH, "%s entered observer mode\n", ent->client->pers.netname);
 	} //end else
 } //end of the function ClientToggleObserver
@@ -286,7 +286,7 @@ void ClientToggleCameraFixed(edict_t *ent)
 // "camname" command: flip CAMFL_NAME (whether the tracked player's
 // name is shown on the chase camera).
 //===========================================================================
-static void ClientToggleCameraName(edict_t *ent)
+void ClientToggleCameraName(edict_t *ent)
 {
 	ent->client->camera.flags ^= CAMFL_NAME;
 	gi.cprintf(ent, PRINT_HIGH, "camera player names ");
@@ -306,7 +306,7 @@ static void ClientToggleCameraName(edict_t *ent)
 // the camera at the observer himself and start the autocam state
 // machine on a fresh frame.
 //===========================================================================
-static void ClientToggleAutoCam(edict_t *ent)
+void ClientToggleAutoCam(edict_t *ent)
 {
 	camera_t *cam;
 	vec3_t forward;
@@ -314,11 +314,11 @@ static void ClientToggleAutoCam(edict_t *ent)
 	if (!(ent->flags & FL_OBSERVER))
 		ClientToggleObserver(ent);
 
-	cam = &ent->client->camera;
-	cam->flags ^= CAMFL_AUTOCAM;
+	ent->client->camera.flags ^= CAMFL_AUTOCAM;
 	gi.cprintf(ent, PRINT_HIGH, "autocam ");
-	if (cam->flags & CAMFL_AUTOCAM)
+	if (ent->client->camera.flags & CAMFL_AUTOCAM)
 	{
+		cam = &ent->client->camera;
 		cam->dest[0] = ent->s.origin[0];
 		cam->dest[1] = ent->s.origin[1];
 		cam->dest[2] = ent->s.origin[2];
@@ -341,7 +341,7 @@ static void ClientToggleAutoCam(edict_t *ent)
 // "chasecam" command: enter observer mode if necessary, then flip
 // CAMFL_CHASECAM.
 //===========================================================================
-static void ClientToggleChaseCam(edict_t *ent)
+void ClientToggleChaseCam(edict_t *ent)
 {
 	if (!(ent->flags & FL_OBSERVER))
 		ClientToggleObserver(ent);
@@ -456,7 +456,7 @@ static void CameraAutoCamThink(edict_t *ent, usercmd_t *ucmd)
 static void CameraChaseCamThink(edict_t *ent, usercmd_t *ucmd)
 {
 	camera_t *cam;
-	vec3_t   angles, forward, up, dir, end, cmdangles;
+	vec3_t   angles, dir, horizfwd, up, forward, end, cmdangles;
 	trace_t  tr;
 
 	if (!(ent->client->camera.flags & CAMFL_FIXED))
@@ -487,20 +487,22 @@ static void CameraChaseCamThink(edict_t *ent, usercmd_t *ucmd)
 	angles[PITCH] = 0;
 	AngleVectors(angles, forward, NULL, NULL);
 
-	// Pitch correction: project forward onto the up plane so the camera
-	// rises and falls with the target's pitch:
-	//   forward[2] = -(forward[0]*up[0] + forward[1]*up[1]) / up[2]
-	forward[2] = (forward[0] * up[0] + forward[1] * up[1]) * -1.0 / up[2];
-	VectorNormalize(forward);
+	// Pitch correction: build a horizontal forward, re-tilted so it's
+	// perpendicular to up.  Original keeps `forward` unmodified and uses
+	// an intermediate vec3.
+	horizfwd[0] = forward[0];
+	horizfwd[1] = forward[1];
+	horizfwd[2] = (horizfwd[0] * up[0] + horizfwd[1] * up[1]) * -1.0 / up[2];
+	VectorNormalize(horizfwd);
 
-	// dir = forward * (-chaseoffset[PITCH]); dir[2] += chaseoffset[ROLL]
-	VectorScale(forward, -cam->chaseoffset[PITCH], dir);
+	// dir = horizfwd * (-chaseoffset[PITCH]); dir[2] += chaseoffset[ROLL]
+	VectorScale(horizfwd, -cam->chaseoffset[PITCH], dir);
 	dir[2] += cam->chaseoffset[ROLL];
 
-	// cam->origin = target.origin + chaseoffset
-	cam->origin[0] = cam->ent->s.origin[0] + cam->chaseoffset[0];
-	cam->origin[1] = cam->ent->s.origin[1] + cam->chaseoffset[1];
-	cam->origin[2] = cam->ent->s.origin[2] + cam->chaseoffset[2];
+	// cam->origin = client viewoffset + target.origin
+	cam->origin[0] = cam->ent->client->ps.viewoffset[0] + cam->ent->s.origin[0];
+	cam->origin[1] = cam->ent->client->ps.viewoffset[1] + cam->ent->s.origin[1];
+	cam->origin[2] = cam->ent->client->ps.viewoffset[2] + cam->ent->s.origin[2];
 
 	// end = cam->origin + dir
 	end[0] = cam->origin[0] + dir[0];
@@ -508,16 +510,15 @@ static void CameraChaseCamThink(edict_t *ent, usercmd_t *ucmd)
 	end[2] = cam->origin[2] + dir[2];
 
 	// Trace from cam->origin to end, ignoring the chase target itself.
-	// MASK_OPAQUE = 0x19 in the original disassembly.
 	tr = gi.trace(cam->origin, vec3_origin, vec3_origin, end, cam->ent, MASK_OPAQUE);
 
-	// Push the endpoint 5 units further along the (re-normalised) forward
-	// vector so the camera doesn't sit flush against the wall it hit.
-	VectorNormalize2(forward, angles);   // disasm calls VectorNormalize2(forward, &angles[0])
-	VectorScale(forward, 5.0, forward);
-	end[0] = tr.endpos[0] + forward[0];
-	end[1] = tr.endpos[1] + forward[1];
-	end[2] = tr.endpos[2] + forward[2];
+	// Push the endpoint 5 units further along the (re-normalised)
+	// horizontal forward so the camera doesn't sit flush against the wall.
+	vectoangles(horizfwd, angles);
+	VectorScale(horizfwd, 5.0, horizfwd);
+	end[0] = tr.endpos[0] + horizfwd[0];
+	end[1] = tr.endpos[1] + horizfwd[1];
+	end[2] = tr.endpos[2] + horizfwd[2];
 
 	// Convert ucmd->angles (short) -> cmdangles (float) via SHORT2ANGLE.
 	cmdangles[0] = SHORT2ANGLE(ucmd->angles[0]);
@@ -699,7 +700,7 @@ static void CameraInputThink(edict_t *ent, usercmd_t *ucmd)
 	m_pitch_val = -0.022f;
 	if (m_pitch && m_pitch->value != 0.0f)
 		m_pitch_val = m_pitch->value;
-	inv_m_pitch = -0.022f / m_pitch_val;
+	inv_m_pitch = -0.022 / m_pitch_val;
 
 	// chaseoffset[ROLL] is the "vertical" component (offset behind the player).
 	// Adjust by  +/- 0.5 * pitch_diff * inv_m_pitch depending on attack-button
@@ -707,23 +708,30 @@ static void CameraInputThink(edict_t *ent, usercmd_t *ucmd)
 	if (ucmd->buttons & 1)
 	{
 		if (pitch_diff >  3.0f)
-			cam->chaseoffset[ROLL] += inv_m_pitch * pitch_diff * 0.5f;
+			cam->chaseoffset[ROLL] += inv_m_pitch * pitch_diff * 0.5;
 		else if (pitch_diff < -3.0f)
-			cam->chaseoffset[ROLL] += inv_m_pitch * pitch_diff * 0.5f;
+			cam->chaseoffset[ROLL] += inv_m_pitch * pitch_diff * 0.5;
 	}
 	else
 	{
 		if (pitch_diff >  3.0f)
-			cam->chaseoffset[YAW] -= inv_m_pitch * pitch_diff * 0.5f;
+			cam->chaseoffset[PITCH] -= inv_m_pitch * pitch_diff * 0.5;
 		else if (pitch_diff < -3.0f)
-			cam->chaseoffset[YAW] -= inv_m_pitch * pitch_diff * 0.5f;
+			cam->chaseoffset[PITCH] -= inv_m_pitch * pitch_diff * 0.5;
 	}
 
 	// chaseoffset[YAW] += yaw_diff * 0.2 ; wrap.  (disasm writes cam+0x2c
-	// which is chaseoffset[1]=[YAW]; only triggered if |yaw_diff|>10)
-	if (yaw_diff >  10.0f || yaw_diff < -10.0f)
+	// which is chaseoffset[1]=[YAW]; only triggered if |yaw_diff|>10).
+	// Original mirrors the pitch block: two separate branches > 10 and < -10
+	// each duplicating the body.
+	if (yaw_diff >  10.0f)
 	{
-		cam->chaseoffset[YAW] += yaw_diff * 0.2f;
+		cam->chaseoffset[YAW] += yaw_diff * 0.2;
+		cam->chaseoffset[YAW]  = anglemod(cam->chaseoffset[YAW]);
+	}
+	else if (yaw_diff < -10.0f)
+	{
+		cam->chaseoffset[YAW] += yaw_diff * 0.2;
 		cam->chaseoffset[YAW]  = anglemod(cam->chaseoffset[YAW]);
 	}
 
@@ -787,7 +795,7 @@ static void CameraMove(edict_t *ent, float speed, usercmd_t *ucmd)
 
 	tr = gi.trace(ent->s.origin, vec3_origin, vec3_origin, cam->dest,
 	              ent, OBSERVER_TRACE_MASK);
-	if (tr.fraction < 1.0f)
+	if (tr.fraction < 1.0)
 	{
 		SubApplyCameraOrigin(ent, cam->dest);
 		goto angles_phase;
@@ -816,11 +824,11 @@ static void CameraMove(edict_t *ent, float speed, usercmd_t *ucmd)
 angles_phase:
 	if (cam->state == 0)
 	{
-		// target_ang = VectorNormalize2(viewtarget - dest)
+		// target_ang = vectoangles(viewtarget - dest)
 		move[0] = cam->viewtarget[0] - cam->dest[0];
 		move[1] = cam->viewtarget[1] - cam->dest[1];
 		move[2] = cam->viewtarget[2] - cam->dest[2];
-		VectorNormalize2(move, target_ang);
+		vectoangles(move, target_ang);
 		// SubLerpAngle(cam->angles, target_ang, 0.2, level.time - lasttime)
 		SubLerpAngle(cam->angles, target_ang, 0.2f, level.time - cam->lasttime);
 	}
@@ -837,7 +845,7 @@ angles_phase:
 		move[0] = cam->ent->s.origin[0] - ent->s.origin[0];
 		move[1] = cam->ent->s.origin[1] - ent->s.origin[1];
 		move[2] = cam->ent->s.origin[2] - ent->s.origin[2];
-		VectorNormalize2(move, target_ang);
+		vectoangles(move, target_ang);
 		SubLerpAngle(cam->angles, target_ang, 0.2f, level.time - cam->lasttime);
 	}
 	else
@@ -847,7 +855,7 @@ angles_phase:
 		move[0] = cam->ent->s.origin[0] - ent->s.origin[0];
 		move[1] = cam->ent->s.origin[1] - ent->s.origin[1];
 		move[2] = cam->ent->s.origin[2] - ent->s.origin[2];
-		VectorNormalize2(move, cam->angles);
+		vectoangles(move, cam->angles);
 	}
 
 	cmdangles[PITCH] = SHORT2ANGLE(ucmd->angles[PITCH]);
@@ -999,9 +1007,8 @@ static void CameraAutoCamState2(edict_t *ent, usercmd_t *ucmd)
 static void CameraAutoCamState7(edict_t *ent, usercmd_t *ucmd)
 {
 	camera_t *cam = &ent->client->camera;
-	vec3_t diff;
 	float dist;
-	float new_pause;
+	vec3_t diff;
 
 	if (cam->search_time < level.time)
 	{
@@ -1016,11 +1023,13 @@ static void CameraAutoCamState7(edict_t *ent, usercmd_t *ucmd)
 	if (strcmp(cam->ent->classname, "bodyque") != 0
 	    && cam->ent->deadflag == 0)
 	{
-		edict_t *next = cam->ent->goalentity;
-		if (next != NULL)
-			cam->ent = next;
+		if (cam->ent->goalentity != NULL)
+			cam->ent = cam->ent->goalentity;
 		else
-			{ SubAbortAutocam(ent, ucmd); return; }
+		{
+			SubAbortAutocam(ent, ucmd);
+			return;
+		}
 	}
 
 	if (cam->ent->inuse && cam->ent != ent)
@@ -1030,15 +1039,15 @@ static void CameraAutoCamState7(edict_t *ent, usercmd_t *ucmd)
 		diff[1] = ent->s.origin[1] - cam->dest[1];
 		diff[2] = ent->s.origin[2] - cam->dest[2];
 		dist = VectorLength(diff);
-		if (dist <= 10.0f)
+		if (dist > 10.0f)
 		{
-			new_pause = level.time + 1.5f;            // 0x100922b0 = 1.5
-			if (cam->pause_time < new_pause)
-				cam->pause_time = new_pause;
+			dist = level.time + 1.5;
+			if (cam->pause_time < dist)
+				cam->pause_time = dist;
 		}
 	}
 
-	if (cam->pause_time < level.time)
+	if (level.time > cam->pause_time)
 	{
 		SubAbortAutocam(ent, ucmd);
 		return;
@@ -1049,54 +1058,37 @@ static void CameraAutoCamState7(edict_t *ent, usercmd_t *ucmd)
 		// Latch viewtarget onto the corpse origin (with z bump 8).
 		cam->viewtarget[0] = cam->ent->s.origin[0];
 		cam->viewtarget[1] = cam->ent->s.origin[1];
-		cam->viewtarget[2] = cam->ent->s.origin[2] + 8.0f;   // 0x1009215c
+		cam->viewtarget[2] = cam->ent->s.origin[2];
+		cam->viewtarget[2] += 8.0f;
 
-		/* If we can't see the target point, decide whether to retry-target
-		   or abort.  disasm @ 0x10079de1..0x10079e21 checks horizontal
-		   velocity (cam->ent->velocity[0] at +0x178 and velocity[1] at
-		   +0x17c) -- NOT [1] and [2] -- with fcomp 0.0 ; test ah,0x40 (C3
-		   only), so the predicate is EQUAL to 0, not <= 0. */
 		if (!SubCanSeePoint(ent, cam->viewtarget))
 		{
-			float vx = cam->ent->velocity[0];
-			float vy = cam->ent->velocity[1];
-			if (vx == 0.0f && vy == 0.0f)
+			if (cam->ent->velocity[0] == 0.0f && cam->ent->velocity[1] == 0.0f)
 			{
 				SubAbortAutocam(ent, ucmd);
 				return;
 			}
 			SubSetAutocamTarget(ent, cam->ent, ucmd);
 			cam->state = 7;
-			cam->pause_time = level.time + 2.0f;          // 0x1009216c LSB = 2.0
+			cam->pause_time = level.time + 2.0f;
 		}
 
-		/* Refresh pause_time when EITHER horizontal velocity component is
-		   non-zero.  disasm @ 0x10079e58..0x10079e97 same fcomp 0.0 ; test
-		   ah,0x40 pattern on velocity[0] and velocity[1]. */
-		{
-			float vx = cam->ent->velocity[0];
-			float vy = cam->ent->velocity[1];
-			if (vx != 0.0f || vy != 0.0f)
-				cam->pause_time = level.time + 2.0f;
-		}
+		if (cam->ent->velocity[0] != 0.0f || cam->ent->velocity[1] != 0.0f)
+			cam->pause_time = level.time + 2.0f;
 	}
 
 	// Compute viewtarget = dest + 59 * normalize(dest - viewtarget)
 	diff[0] = cam->dest[0] - cam->viewtarget[0];
 	diff[1] = cam->dest[1] - cam->viewtarget[1];
 	diff[2] = cam->dest[2] - cam->viewtarget[2];
-	dist = VectorLength(diff);
-	if (dist <= 60.0f)                                   // 0x10092230 = 60
+	if (VectorLength(diff) <= 60.0f)
 		return;
 
-	diff[0] = cam->dest[0] - cam->viewtarget[0];
-	diff[1] = cam->dest[1] - cam->viewtarget[1];
-	diff[2] = cam->dest[2] - cam->viewtarget[2];
-	cam->dest[0] = diff[0];
-	cam->dest[1] = diff[1];
-	cam->dest[2] = diff[2];
+	cam->dest[0] = cam->dest[0] - cam->viewtarget[0];
+	cam->dest[1] = cam->dest[1] - cam->viewtarget[1];
+	cam->dest[2] = cam->dest[2] - cam->viewtarget[2];
 	VectorNormalize(cam->dest);
-	VectorMA(cam->viewtarget, 59.0f, cam->dest, cam->dest);   // 0x426c0000 = 59
+	VectorMA(cam->viewtarget, 59.0f, cam->dest, cam->dest);
 } //end of the function CameraAutoCamState7
 
 //===========================================================================
@@ -1158,7 +1150,8 @@ static void CameraAutoCamState0(edict_t *ent, usercmd_t *ucmd)
 	if (rnd < 1.0f)                                       // 0x10092178 = 1.0
 	{
 		// Pick best-health client.
-		for (it = SubNextClient(NULL); it != NULL; it = SubNextClient(it))
+		it = SubNextClient(NULL);
+		while (it != NULL)
 		{
 			if (it != cam->lastent && it->deadflag == 0)
 			{
@@ -1169,6 +1162,7 @@ static void CameraAutoCamState0(edict_t *ent, usercmd_t *ucmd)
 					best   = h;
 				}
 			}
+			it = SubNextClient(it);
 		}
 		goto install_target;
 	}
@@ -1176,7 +1170,8 @@ static void CameraAutoCamState0(edict_t *ent, usercmd_t *ucmd)
 	if (rnd < 2.0f)                                       // 0x1009216c = 2.0
 	{
 		// Pick best-score client (negative score clamped to zero).
-		for (it = SubNextClient(NULL); it != NULL; it = SubNextClient(it))
+		it = SubNextClient(NULL);
+		while (it != NULL)
 		{
 			if (it != cam->lastent && it->deadflag == 0)
 			{
@@ -1188,16 +1183,19 @@ static void CameraAutoCamState0(edict_t *ent, usercmd_t *ucmd)
 					best   = s;
 				}
 			}
+			it = SubNextClient(it);
 		}
 		goto install_target;
 	}
 
 	// Uniform random pick: count valid candidates, then pick the n-th.
 	best = 0.0f;
-	for (it = SubNextClient(NULL); it != NULL; it = SubNextClient(it))
+	it = SubNextClient(NULL);
+	while (it != NULL)
 	{
 		if (it != cam->lastent && it->deadflag == 0)
 			best += 1.0f;                                 // 0x10092178 = 1.0
+		it = SubNextClient(it);
 	}
 	if (best <= 0.0f)
 		goto install_target;
@@ -1502,16 +1500,9 @@ static void SubApplyCameraOrigin(edict_t *ent, vec3_t origin)
 //===========================================================================
 static void SubApplyCameraAngles(edict_t *ent, vec3_t new_angles, vec3_t cmd_angles)
 {
-	gclient_t *cl = ent->client;
-	float diff;
-	int i;
-	for (i = 0; i < 3; i++)
-	{
-		diff = AngleDifference(new_angles[i], cmd_angles[i]);
-		diff = anglemod(diff);
-		cl->ps.pmove.delta_angles[i] =
-			(short)((int)(diff * 65536.0f / 360.0f) & 0xffff);
-	}
+	ent->client->ps.pmove.delta_angles[0] = (short)((int)(anglemod(AngleDifference(new_angles[0], cmd_angles[0])) * 65536.0f / 360.0f) & 0xffff);
+	ent->client->ps.pmove.delta_angles[1] = (short)((int)(anglemod(AngleDifference(new_angles[1], cmd_angles[1])) * 65536.0f / 360.0f) & 0xffff);
+	ent->client->ps.pmove.delta_angles[2] = (short)((int)(anglemod(AngleDifference(new_angles[2], cmd_angles[2])) * 65536.0f / 360.0f) & 0xffff);
 }
 
 // --- sub_10078125 -----------------------------------------------------------
@@ -1521,35 +1512,30 @@ static void SubApplyCameraAngles(edict_t *ent, vec3_t new_angles, vec3_t cmd_ang
 //===========================================================================
 static qboolean SubCanSeePoint(edict_t *ent, vec3_t point)
 {
-	vec3_t start, end;
-	int contmask = 1;
+	vec3_t sav_origin, start, end;
+	int contmask;
 	trace_t tr;
 
-	VectorCopy(ent->s.origin, start);
+	VectorCopy(ent->s.origin, sav_origin);
 
-	if (!gi.inPVS(start, point))
+	if (!gi.inPVS(sav_origin, point))
 		return false;
+
+	contmask = 1;
+	VectorCopy(sav_origin, start);
+	VectorCopy(point,      end);
 
 	if (gi.pointcontents(point) & MASK_WATER)
 		contmask |= MASK_WATER;
 
-	if (gi.pointcontents(start) & MASK_WATER)
+	if (gi.pointcontents(sav_origin) & MASK_WATER)
 	{
 		if (!(contmask & MASK_WATER))
 		{
-			VectorCopy(point, start);
-			VectorCopy(ent->s.origin, end);
-		}
-		else
-		{
-			VectorCopy(start, end);
-			end[0] = point[0]; end[1] = point[1]; end[2] = point[2];
+			VectorCopy(point,      start);
+			VectorCopy(sav_origin, end);
 		}
 		contmask ^= MASK_WATER;
-	}
-	else
-	{
-		VectorCopy(point, end);
 	}
 
 	tr = gi.trace(start, NULL, NULL, end, ent, contmask);
@@ -1563,7 +1549,9 @@ static qboolean SubCanSeePoint(edict_t *ent, vec3_t point)
 		}
 	}
 
-	return tr.fraction >= 1.0f;
+	if (tr.fraction >= 1.0f)
+		return true;
+	return false;
 }
 
 // --- sub_100782ad -----------------------------------------------------------
@@ -1573,27 +1561,34 @@ static qboolean SubCanSeePoint(edict_t *ent, vec3_t point)
 //===========================================================================
 static qboolean SubTargetVisible(edict_t *ent, edict_t *target)
 {
-	vec3_t start, end;
-	edict_t *passent = ent;
-	int contmask = 1;
+	vec3_t sav_origin, start, end;
+	edict_t *passent;
+	edict_t *targent;
+	int contmask;
 	trace_t tr;
 
-	if (!gi.inPVS(ent->s.origin, target->s.origin))
+	VectorCopy(ent->s.origin, sav_origin);
+
+	if (!gi.inPVS(sav_origin, target->s.origin))
 		return false;
 
-	VectorCopy(ent->s.origin,    start);
+	contmask = 1;
+	passent = ent;
+	targent = target;
+	VectorCopy(sav_origin,       start);
 	VectorCopy(target->s.origin, end);
 
 	if (gi.pointcontents(target->s.origin) & MASK_WATER)
 		contmask |= MASK_WATER;
 
-	if (gi.pointcontents(ent->s.origin) & MASK_WATER)
+	if (gi.pointcontents(sav_origin) & MASK_WATER)
 	{
 		if (!(contmask & MASK_WATER))
 		{
 			passent = target;
+			targent = ent;
 			VectorCopy(target->s.origin, start);
-			VectorCopy(ent->s.origin,    end);
+			VectorCopy(sav_origin,       end);
 		}
 		contmask ^= MASK_WATER;
 	}
@@ -1609,7 +1604,9 @@ static qboolean SubTargetVisible(edict_t *ent, edict_t *target)
 		}
 	}
 
-	return (tr.fraction >= 1.0f) || (tr.ent == target);
+	if (tr.fraction >= 1.0f || tr.ent == targent)
+		return true;
+	return false;
 }
 
 // --- sub_1007845f -----------------------------------------------------------
@@ -1621,24 +1618,25 @@ static qboolean SubTargetVisible(edict_t *ent, edict_t *target)
 static edict_t *SubNextClient(edict_t *prev)
 {
 	int i;
-	/* disasm reads game.maxclients at [0x100d04c8] (same address used by
-	   ClientCycleCamera/ClientSetCamera); iterate only over client slots. */
-	int n = game.maxclients;
+	edict_t *e;
 
 	if (prev == NULL)
 		i = 0;
 	else
 		i = (int)(prev - g_edicts);
 
-	for (; i < n; i++)
+	while (i < game.maxclients)
 	{
-		edict_t *e = &g_edicts[i + 1];
-		if (!e->inuse)
-			continue;
-		if (e->flags & FL_OBSERVER)
-			continue;
-		if (Q_stricmp(e->classname, "player") == 0)
-			return e;
+		e = g_edicts + i + 1;
+		if (e->inuse)
+		{
+			if (!(e->flags & FL_OBSERVER))
+			{
+				if (Q_stricmp(e->classname, "player") == 0)
+					return e;
+			}
+		}
+		i++;
 	}
 	return NULL;
 }
@@ -1657,20 +1655,18 @@ static edict_t *SubNextClient(edict_t *prev)
 //===========================================================================
 static void SubCenterPrintScore(edict_t *ent, edict_t *target, char *prefix)
 {
-	char score_buf[0x80];                                /* [ebp-0x80]  */
 	char fragword[0x80];                                 /* [ebp-0x100] */
-	int  score;
+	char score_buf[0x80];                                /* [ebp-0x80]  */
 
 	if (!(ent->client->camera.flags & CAMFL_NAME))      /* +0xf98 */
 		return;
 
-	score = target->client->resp.score;                 /* +0xda8 */
-	sprintf(score_buf, "%d", score);
+	sprintf(score_buf, "%d", target->client->resp.score);   /* +0xda8 */
 
-	if (score == 1 || score == -11)
-		strcpy(fragword, "frag");
-	else
+	if (target->client->resp.score != 1 && target->client->resp.score != -11)
 		strcpy(fragword, "frags");
+	else
+		strcpy(fragword, "frag");
 
 	gi.centerprintf(ent, "%s\n\n\n%s - %s %s",
 	                prefix,
@@ -1759,37 +1755,36 @@ static void SubOnTargetDeath(edict_t *ent)
 static void SubGetTargetMuzzle(edict_t *ent, vec3_t out)
 {
 	camera_t *cam = &ent->client->camera;
-	vec3_t angles, up, fwd, viewfrom, endpos, ofs;
-	float adj;
+	vec3_t angles, up, fwd, horizfwd, ofs, viewfrom, endpos;
 	trace_t tr;
 
-	/* angles = cam->angles, but pitch zeroed, yaw anglemod'd */
-	angles[0] = 0.0f;
-	angles[1] = anglemod(cam->angles[1] + 0.0f);
+	/* copy cam->angles into local; first AngleVectors uses unmodified */
+	angles[0] = cam->angles[0];
+	angles[1] = cam->angles[1];
 	angles[2] = cam->angles[2];
 
 	/* 1) up from full angles */
-	AngleVectors(cam->angles, NULL, NULL, up);
+	AngleVectors(angles, NULL, NULL, up);
 
-	/* 2) forward from flat angles */
+	/* zero pitch, anglemod yaw, then forward from flat angles */
+	angles[1] = anglemod(angles[1] + 0.0f);
+	angles[0] = 0.0f;
 	AngleVectors(angles, fwd, NULL, NULL);
 
-	/* re-tilt forward so it's perpendicular to up */
-	adj = (fwd[0]*up[0] + fwd[1]*up[1]) * -1.0f / up[2];
-	fwd[2] = adj;
-	VectorNormalize(fwd);
+	/* build a horizontal forward, re-tilted so it's perpendicular to up */
+	horizfwd[0] = fwd[0];
+	horizfwd[1] = fwd[1];
+	horizfwd[2] = (horizfwd[0]*up[0] + horizfwd[1]*up[1]) * -1.0f / up[2];
+	VectorNormalize(horizfwd);
 
-	/* ofs = -90 * fwd + (0,0,16) */
-	VectorScale(fwd, -90.0f, ofs);
+	/* ofs = -90 * horizfwd + (0,0,16) */
+	VectorScale(horizfwd, -90.0f, ofs);
 	ofs[2] += 16.0f;
 
 	/* viewfrom = cam->ent->s.origin + cam->ent->client->ps.viewoffset */
-	{
-		gclient_t *tc = cam->ent->client;
-		viewfrom[0] = cam->ent->s.origin[0] + tc->ps.viewoffset[0];   /* +0x28 */
-		viewfrom[1] = cam->ent->s.origin[1] + tc->ps.viewoffset[1];   /* +0x2c */
-		viewfrom[2] = cam->ent->s.origin[2] + tc->ps.viewoffset[2];   /* +0x30 */
-	}
+	viewfrom[0] = cam->ent->client->ps.viewoffset[0] + cam->ent->s.origin[0];
+	viewfrom[1] = cam->ent->client->ps.viewoffset[1] + cam->ent->s.origin[1];
+	viewfrom[2] = cam->ent->client->ps.viewoffset[2] + cam->ent->s.origin[2];
 
 	endpos[0] = viewfrom[0] + ofs[0];
 	endpos[1] = viewfrom[1] + ofs[1];
@@ -1800,7 +1795,7 @@ static void SubGetTargetMuzzle(edict_t *ent, vec3_t out)
 	if (tr.fraction < 1.0f && tr.ent != g_edicts)
 		VectorMA(tr.endpos, 70.0f, tr.plane.normal, out);
 	else
-		VectorMA(tr.endpos, 20.0f, fwd, out);
+		VectorMA(tr.endpos, 20.0f, horizfwd, out);
 }
 
 // --- sub_10078bcc -----------------------------------------------------------
@@ -1846,8 +1841,11 @@ static qboolean SubCameraFindFlybyPos(edict_t *ent, edict_t *target, vec3_t out_
 
 static void SubSetAutocamTarget(edict_t *ent, edict_t *target, usercmd_t *ucmd)
 {
-	camera_t *cam = &ent->client->camera;
-	vec3_t   pos, diff;
+	camera_t *cam;
+	vec3_t   pos;
+	vec3_t   diff;
+
+	cam = &ent->client->camera;
 
 	/* disasm @ 0x10079aea: fadd qword [0x100921a8]=0.4 -- double-precision
 	   add, so the literal must be a double (no `f` suffix) to match. */
@@ -1870,7 +1868,7 @@ static void SubSetAutocamTarget(edict_t *ent, edict_t *target, usercmd_t *ucmd)
 		return;
 	}
 
-	SubAutocamSetSpot(target, cam->viewtarget);
+	SubAutocamSetSpot(cam->ent, cam->viewtarget);
 
 	cam->dest[0] = pos[0];
 	cam->dest[1] = pos[1];
@@ -1932,8 +1930,12 @@ static float SubScoreCameraPos(edict_t *ent, vec3_t ofs, vec3_t out_endpos)
 	int       cv_view, cv_end;
 	float     dist;
 
-	mins[0] = mins[1] = mins[2] = -8.0f;
-	maxs[0] = maxs[1] = maxs[2] =  8.0f;
+	mins[0] = -8.0f;
+	mins[1] = -8.0f;
+	mins[2] = -8.0f;
+	maxs[0] = 8.0f;
+	maxs[1] = 8.0f;
+	maxs[2] = 8.0f;
 
 	VectorNormalize(ofs);
 	VectorScale(ofs, 5.0f,   unit5);
@@ -2026,41 +2028,38 @@ static float SubScoreCameraPos(edict_t *ent, vec3_t ofs, vec3_t out_endpos)
 // normalises and re-scales them to 700 units.  Tiers 4-5 then use those
 // post-scoring values when building their additive offsets.
 //===========================================================================
-#define TRY_CANDIDATE(ofs_expr) do { \
+#define TRY_CANDIDATE(ofs_expr) { \
 		ofs_expr; \
 		score = SubScoreCameraPos(ent, cand_ofs, cand_endpos); \
 		if (score < best_score) { \
 			best_score = score; \
-			VectorCopy(cand_endpos, best_endpos); \
+			VectorCopy(cand_endpos, input_angles); \
 		} \
-	} while (0)
+	}
 
 static qboolean SubCameraFindFlybyPos(edict_t *ent, edict_t *target, vec3_t out)
 {
-	camera_t *cam = &ent->client->camera;
-	vec3_t    fwd, right, up;
-	vec3_t    cand_ofs;
-	vec3_t    cand_endpos;
-	vec3_t    best_endpos;
-	vec3_t    input_angles;
+	vec3_t    fwd;
 	float     best_score;
+	camera_t *cam;
+	vec3_t    right;
 	float     score;
+	vec3_t    input_angles;     /* doubles as input_angles slot */
+	vec3_t    cand_endpos;
+	vec3_t    up;
+	vec3_t    cand_ofs;
 
 	(void)target;   /* unused in the original */
 
-	/* disasm @ 0x10078f5f..0x10078f8d: stack slots [ebp-0x30..-0x28]
-	   (later reused as best_endpos) are zeroed then [ebp-0x28] is set to
-	   cam->ent->s.angles[2] (= s.angles[ROLL] at edict offset 0x18); the
-	   resulting vec3 {0, 0, ent.angles[ROLL]} is passed to AngleVectors as
-	   the seed for the search basis -- NOT cam->angles.  best_endpos
-	   reuses the same slots but is only ever read after a successful
-	   candidate has overwritten it, so its initial value is irrelevant. */
-	input_angles[0] = 0;
-	input_angles[1] = 0;
+	cam = &ent->client->camera;
+
+	/* disasm @ 0x10078f5f..0x10078f8d: slots [ebp-0x30..-0x28] are zeroed
+	   via a chained x[0]=x[1]=x[2]=0 (VectorClear) then [ebp-0x28] is
+	   set to cam->ent->s.angles[2].  The same slot is later overwritten
+	   when a candidate beats best_score, so input_angles is reused as
+	   input_angles -- no separate variable. */
+	input_angles[0] = input_angles[1] = input_angles[2] = 0;
 	input_angles[2] = cam->ent->s.angles[2];
-	best_endpos[0] = 0;
-	best_endpos[1] = 0;
-	best_endpos[2] = input_angles[2];
 
 	AngleVectors(input_angles, fwd, right, up);
 	VectorScale(fwd, 3.0f, fwd);
@@ -2100,9 +2099,9 @@ static qboolean SubCameraFindFlybyPos(edict_t *ent, edict_t *target, vec3_t out)
 	{
 		/* Tier 3: pure ±fwd or ±right (these calls mutate fwd/right to 700*unit) */
 		score = SubScoreCameraPos(ent, fwd,   cand_endpos);
-		if (score < best_score) { best_score = score; VectorCopy(cand_endpos, best_endpos); }
+		if (score < best_score) { best_score = score; VectorCopy(cand_endpos, input_angles); }
 		score = SubScoreCameraPos(ent, right, cand_endpos);
-		if (score < best_score) { best_score = score; VectorCopy(cand_endpos, best_endpos); }
+		if (score < best_score) { best_score = score; VectorCopy(cand_endpos, input_angles); }
 		TRY_CANDIDATE((VectorClear(cand_ofs), VectorSubtract(cand_ofs, fwd,   cand_ofs)));
 		TRY_CANDIDATE((VectorClear(cand_ofs), VectorSubtract(cand_ofs, right, cand_ofs)));
 	}
@@ -2148,7 +2147,7 @@ static qboolean SubCameraFindFlybyPos(edict_t *ent, edict_t *target, vec3_t out)
 	if (best_score >= 1000.0f)
 		return false;
 
-	VectorCopy(best_endpos, out);
+	VectorCopy(input_angles, out);
 	return true;
 }
 #undef TRY_CANDIDATE
@@ -2165,32 +2164,30 @@ static qboolean SubCameraFindFlybyPos(edict_t *ent, edict_t *target, vec3_t out)
 //===========================================================================
 int DoObserver(edict_t *ent, usercmd_t *ucmd)
 {
-	camera_t *cam;
 	edict_t *next;
 
 	if (!(ent->flags & FL_OBSERVER)) return 0;
 	if (!ent->client) return 0;
 
-	cam = &ent->client->camera;
-	if (!(cam->flags & CAMFL_AUTOCAM))
+	if (!(ent->client->camera.flags & CAMFL_AUTOCAM))
 		ClientPlaceCamera(ent);
 
 	// jump button (upmove > 100) cycles the target / chase camera, with a
 	// 0.5s debounce held in cam->lastcycle so a held key doesn't tear
 	// through the client list in one frame (qword 0.5 at gamex86.dll
 	// 0x10092138, fsub'd from level.time at sub_1007b926+0x6f)
-	if (ucmd->upmove > 100 && level.time - 0.5 > cam->lastcycle)
+	if (ucmd->upmove > 100 && level.time - 0.5 > ent->client->camera.lastcycle)
 	{
-		cam->lastcycle = level.time;
-		if (cam->flags & CAMFL_AUTOCAM)
+		ent->client->camera.lastcycle = level.time;
+		if (ent->client->camera.flags & CAMFL_AUTOCAM)
 		{
-			next = SubNextClient(cam->ent);
+			next = SubNextClient(ent->client->camera.ent);
 			if (!next || next == ent)
 				next = SubNextClient(next);
 			if (next && next != ent)
 				SubSetAutocamTarget(ent, next, ucmd);
 		} //end if
-		else if (cam->flags & CAMFL_CHASECAM)
+		else if (ent->client->camera.flags & CAMFL_CHASECAM)
 		{
 			ClientCycleCamera(ent);
 		} //end else if
@@ -2198,14 +2195,14 @@ int DoObserver(edict_t *ent, usercmd_t *ucmd)
 
 	ent->client->ps.gunindex = 0;
 
-	if ((cam->flags & (CAMFL_AUTOCAM | CAMFL_CHASECAM)) &&
-	    !(cam->ent == ent && (cam->flags & CAMFL_CHASECAM)))
+	if ((ent->client->camera.flags & (CAMFL_AUTOCAM | CAMFL_CHASECAM)) &&
+	    !(ent->client->camera.ent == ent && (ent->client->camera.flags & CAMFL_CHASECAM)))
 	{
 		// tracking some other client: drive the camera and silence input
 		ent->client->ps.pmove.pm_type = PM_DEAD;
-		if (cam->flags & CAMFL_AUTOCAM)
+		if (ent->client->camera.flags & CAMFL_AUTOCAM)
 			CameraAutoCamThink(ent, ucmd);
-		else if (cam->flags & CAMFL_CHASECAM)
+		else if (ent->client->camera.flags & CAMFL_CHASECAM)
 			CameraChaseCamThink(ent, ucmd);
 		ucmd->buttons &= ~(BUTTON_ATTACK | BUTTON_USE);
 		ucmd->forwardmove = 0;
@@ -2231,15 +2228,16 @@ int DoObserver(edict_t *ent, usercmd_t *ucmd)
 //===========================================================================
 qboolean ClientObserverCmd(char *cmd, edict_t *ent)
 {
-	if (!Q_stricmp(cmd, "observer"))     { ClientToggleObserver(ent);    return true; }
-	if (!Q_stricmp(cmd, "autocam"))      { ClientToggleAutoCam(ent);     return true; }
-	if (!Q_stricmp(cmd, "chasecam"))     { ClientToggleChaseCam(ent);    return true; }
-	if (!Q_stricmp(cmd, "cyclecam"))     { ClientCycleCamera(ent);       return true; }
-	if (!Q_stricmp(cmd, "setcam"))       { ClientSetCamera(ent);         return true; }
-	if (!Q_stricmp(cmd, "camfixed"))     { ClientToggleCameraFixed(ent); return true; }
-	if (!Q_stricmp(cmd, "camname"))      { ClientToggleCameraName(ent);  return true; }
-	if (!Q_stricmp(cmd, "observerhelp")) { ClientObserverHelp(ent);      return true; }
-	return false;
+	if (!Q_stricmp(cmd, "observer"))          ClientToggleObserver(ent);
+	else if (!Q_stricmp(cmd, "autocam"))      ClientToggleAutoCam(ent);
+	else if (!Q_stricmp(cmd, "chasecam"))     ClientToggleChaseCam(ent);
+	else if (!Q_stricmp(cmd, "cyclecam"))     ClientCycleCamera(ent);
+	else if (!Q_stricmp(cmd, "setcam"))       ClientSetCamera(ent);
+	else if (!Q_stricmp(cmd, "camfixed"))     ClientToggleCameraFixed(ent);
+	else if (!Q_stricmp(cmd, "camname"))      ClientToggleCameraName(ent);
+	else if (!Q_stricmp(cmd, "observerhelp")) ClientObserverHelp(ent);
+	else return false;
+	return true;
 } //end of the function ClientObserverCmd
 
 #endif //OBSERVER
